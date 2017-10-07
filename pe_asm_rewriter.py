@@ -3,19 +3,79 @@ import capstone as cs
 import sys
 import os
 import struct
+import copy
 
+
+from collections import OrderedDict
 
 MACHINE_WORD_SIZE = 4
 
 
-# maps address to library function name
+# maps address to library function name and library name
 IMPORT_SECTION_FUNCS = {}
 
 # maps address to function assembler code and pseudoname
+# e.g. {0x11000: {'name': 'sub_11000', 'code': {0x11111: ['mov', 'eax, ebx']}}}
 KNOWN_FUNCS = {}
 
 X86_REGS = ('eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp')
 
+
+
+def print_asm(outfile, asm_description):
+    with open(outfile, 'wb') as outp:
+        for func in IMPORT_SECTION_FUNCS.values():
+            outp.write('extern {}\n'.format(func['name']))
+            outp.write('import {} {}\n'.format(func['name'], func['lib']))
+        outp.write('section .text \n')
+        for func in asm_description.values():
+            outp.write('\n global {}\n\n{}:\n{}'.format(
+                func['name'], func['name'],
+                '\n'.join(' '.join(each for each in line) for line in func['code'].values()))
+            )
+    print('[+] Done dumping asm !')
+
+
+def postproces_defs(func_arr):
+    inst_with_labels = {}
+    for func in func_arr.values():
+        for addr, inst in copy.deepcopy(func['code'].items()):
+            if inst[0] == 'call':
+                try:
+                    # try handling local functions in ".text"
+                    call_target = int(inst[1], 16)
+                    if call_target in KNOWN_FUNCS:
+                        func['code'][addr][1] = KNOWN_FUNCS[call_target]['name']
+                except Exception as ex:
+                    #todo handle import calls
+                    pass
+            elif inst[0].startswith('j'):
+                addr_to_jump = int(inst[1], 16)
+                if addr_to_jump in func['code']:
+                    lbl_name = 'loc_{}'.format(hex(addr_to_jump)[2:])
+                    if addr_to_jump not in inst_with_labels:
+                        # create label on target instruction
+                        inst_with_labels[addr_to_jump] = lbl_name
+                        func['code'][addr_to_jump].insert(0, '{}:\n'.format(lbl_name))
+                    func['code'][addr][1] = lbl_name
+                else:
+                    # only happens on cross-functions jump ; for now just jump on return
+                    addr_to_jump = func['code'].keys()[-1]
+                    if addr_to_jump not in inst_with_labels:
+                        lbl_name = 'loc_{}'.format(hex(addr_to_jump)[2:])
+                        inst_with_labels[addr_to_jump] = lbl_name
+                        func['code'][addr_to_jump].insert(0, '{}:\n'.format(lbl_name))
+                    func['code'][addr][1] = lbl_name
+                    
+        #  just wanna print readable text for now
+        #  can't do it in earlier cycle cause we potentially put labels on earlier addresses
+        for addr, inst in func['code'].items():
+            real_pos = 1 if addr in inst_with_labels else 0
+            func['code'][addr][real_pos] = 4 * ' ' + func['code'][addr][real_pos]
+            #if real_pos:
+            #    assert False, func['code'][addr]
+                   
+                
 class FuncDisasm:
     def __init__(self, binary, entry_point, image_base,
                  sections_arr):
@@ -61,11 +121,17 @@ class FuncDisasm:
         return False
 
     def run(self):
-        function_code = []
+        function_code = OrderedDict()
         for inst in self.disasmer.disasm(self.binary[self.entry_point:],
                                          self.image_base + self.entry_point):
             addr, mnemonic, op_string = hex(inst.address)[:-1], inst.mnemonic, inst.op_str
-            function_code.append(' '.join((mnemonic, op_string)))
+            # nasm-specific preprocessing cause we gonna use it to compile again
+            if mnemonic == 'lea':
+                op_string = op_string.replace('dword', '')
+            # generated disasm code for string instructions is too verbose and not understood
+            if any(mnemonic.startswith(prefix) for prefix in ('rep', 'movs')):
+                op_string = ''
+            function_code[inst.address] = [mnemonic, op_string.replace('ptr', '')]
             op_string = self.handle_possible_args(inst)
             print addr, mnemonic, op_string
 
@@ -75,7 +141,7 @@ class FuncDisasm:
                     if each.type == cs.x86.X86_OP_MEM:
                         if each.value.mem.disp in IMPORT_SECTION_FUNCS:
                             print('call {}'.format(
-                                IMPORT_SECTION_FUNCS[each.value.mem.disp]
+                                IMPORT_SECTION_FUNCS[each.value.mem.disp]['name']
                                 )
                             )
                         else:
@@ -88,7 +154,6 @@ class FuncDisasm:
             if inst.mnemonic == 'mov':
                 if inst.operands[0].type == cs.x86.X86_OP_REG:
                     first_reg_name = inst.reg_name(inst.operands[0].value.reg)
-                    print("using to assign ", first_reg_name)
                     if inst.operands[1].type == cs.x86.X86_OP_REG:
                         self.regs[first_reg_name] = self.regs[inst.reg_name(inst.operands[1].value.reg)]
                     elif inst.operands[1].type == cs.x86.X86_OP_MEM and not inst.operands[1].value.mem.base and not inst.operands[1].value.mem.index:
@@ -109,7 +174,7 @@ class FuncDisasm:
                     external_call_addr = inst.operands[0].value.mem.disp
                     if external_call_addr in IMPORT_SECTION_FUNCS:
                         print('call {}'.format(
-                                IMPORT_SECTION_FUNCS[external_call_addr]
+                                IMPORT_SECTION_FUNCS[external_call_addr]['name']
                                 )
                             )
                     else:
@@ -118,7 +183,7 @@ class FuncDisasm:
                     reg_val = self.regs[inst.reg_name(inst.operands[0].value.reg)]
                     if reg_val in IMPORT_SECTION_FUNCS:
                         print('call {}'.format(
-                                IMPORT_SECTION_FUNCS[reg_val]
+                                IMPORT_SECTION_FUNCS[reg_val]['name']
                                 )
                             )
                     else:
@@ -135,7 +200,7 @@ class FuncDisasm:
                     else:
                         print('[!] call {}'.format(KNOWN_FUNCS[new_ep + self.image_base]['name']))
         KNOWN_FUNCS[self.entry_point + self.image_base] = {
-            'code': os.linesep.join(function_code),
+            'code': function_code,
             'name': 'sub_{}'.format(hex(self.entry_point + self.image_base)[2:])
         }
 
@@ -167,7 +232,7 @@ for entry in mydriver.DIRECTORY_ENTRY_IMPORT:
     print 'Parsing imports from "{}"'.format(entry.dll)
     for imp in entry.imports:
         print('[!] Took "{}" on {}'.format(imp.name, hex(imp.address)))
-        IMPORT_SECTION_FUNCS[imp.address] = imp.name
+        IMPORT_SECTION_FUNCS[imp.address] = {'name': imp.name, 'lib': entry.dll}
         whole_image[imp.address - mydriver.OPTIONAL_HEADER.ImageBase:
                     imp.address - mydriver.OPTIONAL_HEADER.ImageBase + MACHINE_WORD_SIZE] = \
                     struct.pack('<I', imp.address)
@@ -184,4 +249,6 @@ func_disasm = FuncDisasm(binary=bytes(whole_image), entry_point=start_disas_addr
                          image_base=mydriver.OPTIONAL_HEADER.ImageBase,
                          sections_arr=sections_triplet)
 func_disasm.run()
+postproces_defs(KNOWN_FUNCS)
 
+print_asm('myresult_result.asm', KNOWN_FUNCS)
