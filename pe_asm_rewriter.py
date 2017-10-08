@@ -29,8 +29,11 @@ def print_asm(outfile, asm_description):
             outp.write('import {} {}\n'.format(func['name'], func['lib']))
         outp.write('section .text \n')
         for func in asm_description.values():
-            outp.write('\n global {}\n\n{}:\n{}'.format(
-                func['name'], func['name'],
+            outp.write('\n global {}\n'.format(func['name']))
+        # separate cycle so all global declarations are together for convenience
+        for func in asm_description.values():
+            outp.write('\n{}:\n{}'.format(
+                func['name'],
                 '\n'.join(' '.join(each for each in line) for line in func['code'].values()))
             )
     print('[+] Done dumping asm !')
@@ -131,26 +134,27 @@ class FuncDisasm:
             # generated disasm code for string instructions is too verbose and not understood
             if any(mnemonic.startswith(prefix) for prefix in ('rep', 'movs')):
                 op_string = ''
-            function_code[inst.address] = [mnemonic, op_string.replace('ptr', '')]
-            op_string = self.handle_possible_args(inst)
-            print addr, mnemonic, op_string
 
             if inst.mnemonic == 'jmp':
                 ops = inst.operands
                 for each in inst.operands:
                     if each.type == cs.x86.X86_OP_MEM:
                         if each.value.mem.disp in IMPORT_SECTION_FUNCS:
-                            print('call {}'.format(
-                                IMPORT_SECTION_FUNCS[each.value.mem.disp]['name']
-                                )
-                            )
+                            called_func = IMPORT_SECTION_FUNCS[each.value.mem.disp]['name']
+                            print('call {}'.format(called_func))
+                            return called_func
                         else:
                             print('jump to unknown constant memory displacement : {}'.format(
                                 hex(each.value.mem.disp)
                                 )
                             )
                         return # because we are inside dumb inst cycle
-                #assert False
+            
+            function_code[inst.address] = [mnemonic, op_string.replace('ptr', '')]
+            op_string = self.handle_possible_args(inst)
+            print addr, mnemonic, op_string
+
+            
             if inst.mnemonic == 'mov':
                 if inst.operands[0].type == cs.x86.X86_OP_REG:
                     first_reg_name = inst.reg_name(inst.operands[0].value.reg)
@@ -195,7 +199,10 @@ class FuncDisasm:
                         nested_func = FuncDisasm(self.binary, new_ep, self.image_base,
                                                  self.sections_arr)
                         print('[!] Inside nested function!')
-                        nested_func.run()
+                        rewrite_import_call = nested_func.run()
+                        if rewrite_import_call:
+                            print('[!] Patching last call instruction to imported function')
+                            function_code[function_code.keys()[-1]][1] = rewrite_import_call
                         print('[!] Outside nested function')
                     else:
                         print('[!] call {}'.format(KNOWN_FUNCS[new_ep + self.image_base]['name']))
