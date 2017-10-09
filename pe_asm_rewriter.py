@@ -100,7 +100,7 @@ extra_data = '''
 section .data
     temp_var: db 'AAAA',0
     str_12068 db 128,{}
-'''.format(','.join('0'*63))
+'''.format(','.join('0' * 63))
 
 func_to_replace = {
     'ExAllocatePool': 'pop1_pre_malloc',
@@ -108,6 +108,7 @@ func_to_replace = {
     'memset': 'rtl_fill_trampoline',
     'memcpy': 'rtl_move_trampoline'
 }
+
 
 def cut_string_from_dump(data, string_start):
     start = string_start
@@ -117,8 +118,8 @@ def cut_string_from_dump(data, string_start):
         if next_byte == '\x00':
             break
         idx += 1
-    return data[start:start+idx]
-        
+    return data[start:start + idx]
+
 
 def print_asm(outfile, asm_description):
     with open(outfile, 'wb') as outp:
@@ -155,7 +156,7 @@ def postproces_defs(func_arr):
                     if call_target in KNOWN_FUNCS:
                         func['code'][addr][1] = KNOWN_FUNCS[call_target]['name']
                 except Exception as ex:
-                    #todo handle import calls
+                    # todo handle import calls
                     pass
             elif inst[0].startswith('j'):
                 addr_to_jump = int(inst[1], 16)
@@ -164,7 +165,8 @@ def postproces_defs(func_arr):
                     if addr_to_jump not in inst_with_labels:
                         # create label on target instruction
                         inst_with_labels[addr_to_jump] = lbl_name
-                        func['code'][addr_to_jump].insert(0, '{}:\n'.format(lbl_name))
+                        func['code'][addr_to_jump].insert(
+                            0, '{}:\n'.format(lbl_name))
                     func['code'][addr][1] = lbl_name
                 else:
                     # only happens on cross-functions jump ; for now just jump on return
@@ -172,18 +174,18 @@ def postproces_defs(func_arr):
                     if addr_to_jump not in inst_with_labels:
                         lbl_name = 'loc_{}'.format(hex(addr_to_jump)[2:])
                         inst_with_labels[addr_to_jump] = lbl_name
-                        func['code'][addr_to_jump].insert(0, '{}:\n'.format(lbl_name))
+                        func['code'][addr_to_jump].insert(
+                            0, '{}:\n'.format(lbl_name))
                     func['code'][addr][1] = lbl_name
-                    
+
         #  just wanna print readable text for now
         #  can't do it in earlier cycle cause we potentially put labels on earlier addresses
         for addr, inst in func['code'].items():
             real_pos = 1 if addr in inst_with_labels else 0
-            func['code'][addr][real_pos] = 4 * ' ' + func['code'][addr][real_pos]
-            #if real_pos:
-            #    assert False, func['code'][addr]
-                   
-                
+            func['code'][addr][real_pos] = 4 * \
+                ' ' + func['code'][addr][real_pos]
+
+
 class FuncDisasm:
     def __init__(self, binary, entry_point, image_base,
                  sections_arr):
@@ -198,7 +200,7 @@ class FuncDisasm:
     def handle_possible_args(self, inst):
         found_arg = False
         new_op_str = None
-        
+
         for idx, oper in enumerate(inst.operands):
             if oper.type == cs.x86.X86_OP_MEM and\
                oper.value.mem.base == cs.x86.X86_REG_EBP and\
@@ -206,11 +208,13 @@ class FuncDisasm:
                 new_opers = [None, None]
                 found_arg = True
                 new_opers[idx] = '[{} + arg_{}]'.format(
-                        inst.reg_name(oper.value.mem.base),
-                        oper.value.mem.disp - 2 * MACHINE_WORD_SIZE # one for saved ebp, two for saved eip
-                        )
+                    inst.reg_name(oper.value.mem.base),
+                    # one for saved ebp, two for saved eip
+                    oper.value.mem.disp - 2 * MACHINE_WORD_SIZE
+                )
                 if len(inst.operands) > 1:
-                    new_opers[(idx + 1) % 2] = inst.reg_name(inst.operands[1-idx].reg)
+                    new_opers[(idx + 1) %
+                              2] = inst.reg_name(inst.operands[1 - idx].reg)
                     new_op_str = ', '.join(new_opers)
                 else:
                     new_op_str = new_opers[0]
@@ -233,7 +237,8 @@ class FuncDisasm:
         function_code = OrderedDict()
         for inst in self.disasmer.disasm(self.binary[self.entry_point:],
                                          self.image_base + self.entry_point):
-            addr, mnemonic, op_string = hex(inst.address)[:-1], inst.mnemonic, inst.op_str
+            addr, mnemonic, op_string = hex(
+                inst.address)[:-1], inst.mnemonic, inst.op_str
             # nasm-specific preprocessing cause we gonna use it to compile again
             if mnemonic == 'lea':
                 op_string = op_string.replace('dword', '')
@@ -254,11 +259,12 @@ class FuncDisasm:
                         else:
                             print('jump to unknown constant memory displacement : {}'.format(
                                 hex(each.value.mem.disp)
-                                )
                             )
-                        return # because we are inside dumb inst cycle
-            
-            function_code[inst.address] = [mnemonic, op_string.replace('ptr', '')]
+                            )
+                        return  # because we are inside dumb inst cycle
+
+            function_code[inst.address] = [
+                mnemonic, op_string.replace('ptr', '')]
             op_string = self.handle_possible_args(inst)
             print addr, mnemonic, op_string
             if inst.mnemonic == 'push' and inst.operands[0].value.imm == 0x12068:
@@ -267,11 +273,12 @@ class FuncDisasm:
                 if inst.operands[0].type == cs.x86.X86_OP_REG:
                     first_reg_name = inst.reg_name(inst.operands[0].value.reg)
                     if inst.operands[1].type == cs.x86.X86_OP_REG:
-                        self.regs[first_reg_name] = self.regs[inst.reg_name(inst.operands[1].value.reg)]
+                        self.regs[first_reg_name] = self.regs[inst.reg_name(
+                            inst.operands[1].value.reg)]
                     elif inst.operands[1].type == cs.x86.X86_OP_MEM\
-                         and not inst.operands[1].value.mem.base \
-                         and not inst.operands[1].value.mem.index:
-                        if self.in_proper_data_section(inst.operands[1].value.mem.disp):                                           
+                            and not inst.operands[1].value.mem.base \
+                            and not inst.operands[1].value.mem.index:
+                        if self.in_proper_data_section(inst.operands[1].value.mem.disp):
                             # mem in data section
                             value = struct.unpack('<I',
                                                   self.binary[inst.operands[1].value.mem.disp - self.image_base:
@@ -279,12 +286,14 @@ class FuncDisasm:
                                                   )[0]
                             self.regs[first_reg_name] = value
                             if self.in_proper_data_section(value):
-                                string_data = cut_string_from_dump(self.binary, value - self.image_base)
+                                string_data = cut_string_from_dump(
+                                    self.binary, value - self.image_base)
                                 if set(string_data).issubset(PRINTABLE_CHARS):
                                     string_name = 'str_' + string_data[:7]
                                     KNOWN_STRINGS[string_name] = string_data
                                     function_code[inst.address][1] = '{}, {}'.format(
-                                        inst.reg_name(inst.operands[0].value.reg),
+                                        inst.reg_name(
+                                            inst.operands[0].value.reg),
                                         string_name
                                     )
                     elif inst.operands[1].type == cs.x86.X86_OP_IMM:
@@ -299,9 +308,9 @@ class FuncDisasm:
                                     inst.reg_name(inst.operands[0].value.reg),
                                     string_name
                                 )
-                                                        
+
                     # else some arg/var or whatever manipulations, not gonna do this now
-                    
+
             if inst.mnemonic == 'ret':
                 break
             elif inst.mnemonic == 'call':
@@ -313,9 +322,11 @@ class FuncDisasm:
                         print('call {}'.format(func_name))
                         function_code[inst.address][1] = func_name
                     else:
-                        print('call to unknown addresss : {}'.format(hex(external_call_addr)))
+                        print('call to unknown addresss : {}'.format(
+                            hex(external_call_addr)))
                 elif inst.operands[0].type == cs.x86.X86_OP_REG:
-                    reg_val = self.regs[inst.reg_name(inst.operands[0].value.reg)]
+                    reg_val = self.regs[inst.reg_name(
+                        inst.operands[0].value.reg)]
                     if reg_val in IMPORT_SECTION_FUNCS:
                         USED_IMPORT_FUNCS.add(reg_val)
                         func_name = IMPORT_SECTION_FUNCS[reg_val]['name']
@@ -332,15 +343,19 @@ class FuncDisasm:
                         print('[!] Inside nested function!')
                         rewrite_import_call = nested_func.run()
                         if rewrite_import_call:
-                            print('[!] Patching last call instruction to imported function')
-                            function_code[function_code.keys()[-1]][1] = rewrite_import_call
+                            print(
+                                '[!] Patching last call instruction to imported function')
+                            function_code[function_code.keys(
+                            )[-1]][1] = rewrite_import_call
                         print('[!] Outside nested function')
                     else:
-                        print('[!] call {}'.format(KNOWN_FUNCS[new_ep + self.image_base]['name']))
+                        print('[!] call {}'.format(
+                            KNOWN_FUNCS[new_ep + self.image_base]['name']))
         KNOWN_FUNCS[self.entry_point + self.image_base] = {
             'code': function_code,
             'name': 'sub_{}'.format(hex(self.entry_point + self.image_base)[2:])
         }
+
 
 file_location = r"D:\Job\2017_crack\crackme"
 mydriver = pefile.PE(file_location)
@@ -353,8 +368,8 @@ sections_triplet = []
 print('[!] Section info: ')
 for section in mydriver.sections:
     print section.Name,\
-          hex(mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),\
-          hex(section.Misc_VirtualSize)
+        hex(mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),\
+        hex(section.Misc_VirtualSize)
     sections_triplet.append((
         section.Name,
         mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress,
@@ -362,7 +377,7 @@ for section in mydriver.sections:
     ))
     if section.Name.startswith('.text'):
         text_base_address = section.VirtualAddress
-    
+
 
 whole_image = bytearray(mydriver.get_memory_mapped_image())
 
@@ -376,15 +391,15 @@ for entry in mydriver.DIRECTORY_ENTRY_IMPORT:
         }
         whole_image[imp.address - mydriver.OPTIONAL_HEADER.ImageBase:
                     imp.address - mydriver.OPTIONAL_HEADER.ImageBase + MACHINE_WORD_SIZE] = \
-                    struct.pack('<I', imp.address)
-        
-if text_base_address < 0 :
+            struct.pack('<I', imp.address)
+
+if text_base_address < 0:
     print('[-] Couldn\'t find text section!')
     sys.exit(1)
 print('[!] Text section  base address: {}'.format(hex(text_base_address)))
 
 start_disas_addr = text_base_address + required_function_rva
-assert whole_image[start_disas_addr:start_disas_addr+4] == '\x8b\xff\x55\x8b'
+assert whole_image[start_disas_addr:start_disas_addr + 4] == '\x8b\xff\x55\x8b'
 
 func_disasm = FuncDisasm(binary=bytes(whole_image), entry_point=start_disas_addr,
                          image_base=mydriver.OPTIONAL_HEADER.ImageBase,
