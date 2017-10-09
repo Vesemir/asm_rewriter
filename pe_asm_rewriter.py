@@ -38,14 +38,15 @@ global rtl_move_trampoline
 global start_func
 
 start_func:
-    lea eax, [text_a]
+    lea eax, [password]
     push eax
-    lea eax, [text_b]
+    lea eax, [login]
     push eax
     call sub_110da
 
-text_a: db 'ABCDEFSTRING',0
-text_b: db '1234567890',0
+login: db 'XXXXXXXXX@XXXXXX.XX',0
+password: db '12345678901234567890123456789012',0
+
 
 pop1_pre_malloc:
     pop edx
@@ -98,7 +99,8 @@ rtl_move_trampoline:
 extra_data = '''
 section .data
     temp_var: db 'AAAA',0
-'''
+    str_12068 db 128,{}
+'''.format(','.join('0'*63))
 
 func_to_replace = {
     'ExAllocatePool': 'pop1_pre_malloc',
@@ -259,8 +261,8 @@ class FuncDisasm:
             function_code[inst.address] = [mnemonic, op_string.replace('ptr', '')]
             op_string = self.handle_possible_args(inst)
             print addr, mnemonic, op_string
-
-            
+            if inst.mnemonic == 'push' and inst.operands[0].value.imm == 0x12068:
+                function_code[inst.address][1] = 'str_12068'
             if inst.mnemonic == 'mov':
                 if inst.operands[0].type == cs.x86.X86_OP_REG:
                     first_reg_name = inst.reg_name(inst.operands[0].value.reg)
