@@ -5,6 +5,7 @@ import os
 import struct
 import string
 import copy
+import argparse
 
 
 from collections import OrderedDict
@@ -186,6 +187,45 @@ def postproces_defs(func_arr):
                 ' ' + func['code'][addr][real_pos]
 
 
+def fill_imports(mydriver, whole_image):
+    for entry in mydriver.DIRECTORY_ENTRY_IMPORT:
+        print 'Parsing imports from "{}"'.format(entry.dll)
+        for imp in entry.imports:
+            print('[!] Took "{}" on {}'.format(imp.name, hex(imp.address)))
+            IMPORT_SECTION_FUNCS[imp.address] = {
+                'name': func_to_replace.get(imp.name, imp.name),
+                'lib': entry.dll
+            }
+            whole_image[imp.address - mydriver.OPTIONAL_HEADER.ImageBase:
+                        imp.address - mydriver.OPTIONAL_HEADER.ImageBase + MACHINE_WORD_SIZE] = \
+                struct.pack('<I', imp.address)
+
+
+def get_section_info(mydriver):
+    text_base_address = -1
+    sections_triplet = []
+    
+    print('[!] Section info: ')
+    for section in mydriver.sections:
+        print section.Name,\
+            hex(mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),\
+            hex(section.Misc_VirtualSize)
+        sections_triplet.append((
+            section.Name,
+            mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress,
+            section.Misc_VirtualSize
+        ))
+        if section.Name.startswith('.text'):
+            text_base_address = section.VirtualAddress
+            
+    if text_base_address < 0:
+        print('[-] Couldn\'t find text section!')
+        sys.exit(1)
+    return sections_triplet, text_base_address
+    
+
+
+
 class FuncDisasm:
     def __init__(self, binary, entry_point, image_base,
                  sections_arr):
@@ -357,54 +397,34 @@ class FuncDisasm:
         }
 
 
-file_location = r"D:\Job\2017_crack\crackme"
-mydriver = pefile.PE(file_location)
-assert mydriver.is_driver()
+def main():
+    arg_parser = argparse.ArgumentParser()
+    arg_parser.add_argument('-f', '--file', help='file destination to act on', required=True)
+    arg_parser.add_argument('-r', '--rva', help='RVA of a function inside file to rewrite', required=True)
+    args = arg_parser.parse_args()
+    file_location, required_function_rva = args.file, int(args.rva, 16)
+    if not os.path.exists(file_location):
+        print('[-] Specified file {} not found'.format(file_location))
+        sys.exit(1)
 
-required_function_rva = 0xda
+    mydriver = pefile.PE(file_location)
+    sections_triplet, text_base_address = get_section_info(mydriver)
+    print('[!] Text section  base address: {}'.format(hex(text_base_address)))
+    assert False, sections_triplet
 
-text_base_address = -1
-sections_triplet = []
-print('[!] Section info: ')
-for section in mydriver.sections:
-    print section.Name,\
-        hex(mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),\
-        hex(section.Misc_VirtualSize)
-    sections_triplet.append((
-        section.Name,
-        mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress,
-        section.Misc_VirtualSize
-    ))
-    if section.Name.startswith('.text'):
-        text_base_address = section.VirtualAddress
+    whole_image = bytearray(mydriver.get_memory_mapped_image())
+
+    fill_imports(mydriver, whole_image)
+    
+    start_disas_addr = text_base_address + required_function_rva
+    func_disasm = FuncDisasm(binary=bytes(whole_image), entry_point=start_disas_addr,
+                             image_base=mydriver.OPTIONAL_HEADER.ImageBase,
+                             sections_arr=sections_triplet)
+    func_disasm.run()
+    postproces_defs(KNOWN_FUNCS)
+
+    print_asm('myresult_result.asm', KNOWN_FUNCS)
 
 
-whole_image = bytearray(mydriver.get_memory_mapped_image())
-
-for entry in mydriver.DIRECTORY_ENTRY_IMPORT:
-    print 'Parsing imports from "{}"'.format(entry.dll)
-    for imp in entry.imports:
-        print('[!] Took "{}" on {}'.format(imp.name, hex(imp.address)))
-        IMPORT_SECTION_FUNCS[imp.address] = {
-            'name': func_to_replace.get(imp.name, imp.name),
-            'lib': entry.dll
-        }
-        whole_image[imp.address - mydriver.OPTIONAL_HEADER.ImageBase:
-                    imp.address - mydriver.OPTIONAL_HEADER.ImageBase + MACHINE_WORD_SIZE] = \
-            struct.pack('<I', imp.address)
-
-if text_base_address < 0:
-    print('[-] Couldn\'t find text section!')
-    sys.exit(1)
-print('[!] Text section  base address: {}'.format(hex(text_base_address)))
-
-start_disas_addr = text_base_address + required_function_rva
-assert whole_image[start_disas_addr:start_disas_addr + 4] == '\x8b\xff\x55\x8b'
-
-func_disasm = FuncDisasm(binary=bytes(whole_image), entry_point=start_disas_addr,
-                         image_base=mydriver.OPTIONAL_HEADER.ImageBase,
-                         sections_arr=sections_triplet)
-func_disasm.run()
-postproces_defs(KNOWN_FUNCS)
-
-print_asm('myresult_result.asm', KNOWN_FUNCS)
+if __name__ == '__main__':
+    main()
