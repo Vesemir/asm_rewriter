@@ -6,6 +6,7 @@ import struct
 import string
 import copy
 import argparse
+import logging
 
 
 from collections import OrderedDict
@@ -122,7 +123,7 @@ def cut_string_from_dump(data, string_start):
     return data[start:start + idx]
 
 
-def print_asm(outfile, asm_description):
+def print_asm(outfile, asm_description, logger):
     with open(outfile, 'wb') as outp:
         for name, contents in KNOWN_STRINGS.items():
             outp.write("{}: db '{}',0\n".format(name, contents))
@@ -143,7 +144,7 @@ def print_asm(outfile, asm_description):
                 '\n'.join(' '.join(each for each in line) for line in func['code'].values()))
             )
         outp.write(extra_data)
-    print('[+] Done dumping asm !')
+    logger.info('[+] Done dumping asm !')
 
 
 def postproces_defs(func_arr):
@@ -187,11 +188,11 @@ def postproces_defs(func_arr):
                 ' ' + func['code'][addr][real_pos]
 
 
-def fill_imports(mydriver, whole_image):
+def fill_imports(mydriver, whole_image, logger):
     for entry in mydriver.DIRECTORY_ENTRY_IMPORT:
         print 'Parsing imports from "{}"'.format(entry.dll)
         for imp in entry.imports:
-            print('[!] Took "{}" on {}'.format(imp.name, hex(imp.address)))
+            logger.info('[!] Took "{}" on {}'.format(imp.name, hex(imp.address)))
             IMPORT_SECTION_FUNCS[imp.address] = {
                 'name': func_to_replace.get(imp.name, imp.name),
                 'lib': entry.dll
@@ -201,34 +202,31 @@ def fill_imports(mydriver, whole_image):
                 struct.pack('<I', imp.address)
 
 
-def get_section_info(mydriver):
-    text_base_address = -1
-    sections_triplet = []
+def get_section_info(mydriver, logger):
+    sections_info = {}
     
-    print('[!] Section info: ')
+    logger.info('[!] Section info: ')
     for section in mydriver.sections:
-        print section.Name,\
-            hex(mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),\
-            hex(section.Misc_VirtualSize)
-        sections_triplet.append((
+        logger.info('{} {} {}'.format(
             section.Name,
-            mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress,
+            hex(mydriver.OPTIONAL_HEADER.ImageBase + section.VirtualAddress),
+            hex(section.Misc_VirtualSize)
+            )
+        )
+        sections_info[section.Name] = (
+            section.VirtualAddress,
             section.Misc_VirtualSize
-        ))
-        if section.Name.startswith('.text'):
-            text_base_address = section.VirtualAddress
+        )
             
-    if text_base_address < 0:
+    if '.text\x00\x00\x00' not in sections_info:
         print('[-] Couldn\'t find text section!')
         sys.exit(1)
-    return sections_triplet, text_base_address
-    
-
+    return sections_info
 
 
 class FuncDisasm:
     def __init__(self, binary, entry_point, image_base,
-                 sections_arr):
+                 sections_arr, logger):
         self.disasmer = cs.Cs(cs.CS_ARCH_X86, cs.CS_MODE_32)
         self.disasmer.detail = True
         self.binary = binary
@@ -236,6 +234,7 @@ class FuncDisasm:
         self.image_base = image_base
         self.regs = {each: 0 for each in X86_REGS}
         self.sections_arr = sections_arr
+        self.logger = logger
 
     def handle_possible_args(self, inst):
         found_arg = False
@@ -266,10 +265,10 @@ class FuncDisasm:
         return new_op_str
 
     def in_proper_data_section(self, addr):
-        for section_name, section_start, section_size in self.sections_arr:
-            print(section_start, section_size, self.image_base)
-            if section_start <= addr <= section_start + section_size:
-                print('[!] Found in section "{}"'.format(section_name))
+        for section_name, (start_rva, size) in self.sections_arr.items():
+            section_start = start_rva + self.image_base
+            if section_start <= addr <= section_start + size:
+                self.logger.debug('[!] Found in section "{}"'.format(section_name))
                 return True
         return False
 
@@ -293,11 +292,11 @@ class FuncDisasm:
                         displacement = each.value.mem.disp
                         if displacement in IMPORT_SECTION_FUNCS:
                             called_func = IMPORT_SECTION_FUNCS[displacement]['name']
-                            print('call {}'.format(called_func))
+                            self.logger.debug('call {}'.format(called_func))
                             USED_IMPORT_FUNCS.add(displacement)
                             return called_func
                         else:
-                            print('jump to unknown constant memory displacement : {}'.format(
+                            self.logger.debug('jump to unknown constant memory displacement : {}'.format(
                                 hex(each.value.mem.disp)
                             )
                             )
@@ -305,8 +304,7 @@ class FuncDisasm:
 
             function_code[inst.address] = [
                 mnemonic, op_string.replace('ptr', '')]
-            op_string = self.handle_possible_args(inst)
-            print addr, mnemonic, op_string
+            self.logger.debug('{} {} {}'.format(addr, mnemonic, self.handle_possible_args(inst)))
             if inst.mnemonic == 'push' and inst.operands[0].value.imm == 0x12068:
                 function_code[inst.address][1] = 'str_12068'
             if inst.mnemonic == 'mov':
@@ -359,10 +357,10 @@ class FuncDisasm:
                     if external_call_addr in IMPORT_SECTION_FUNCS:
                         USED_IMPORT_FUNCS.add(external_call_addr)
                         func_name = IMPORT_SECTION_FUNCS[external_call_addr]['name']
-                        print('call {}'.format(func_name))
+                        self.logger.debug('call {}'.format(func_name))
                         function_code[inst.address][1] = func_name
                     else:
-                        print('call to unknown addresss : {}'.format(
+                        self.logger.debug('call to unknown addresss : {}'.format(
                             hex(external_call_addr)))
                 elif inst.operands[0].type == cs.x86.X86_OP_REG:
                     reg_val = self.regs[inst.reg_name(
@@ -370,7 +368,7 @@ class FuncDisasm:
                     if reg_val in IMPORT_SECTION_FUNCS:
                         USED_IMPORT_FUNCS.add(reg_val)
                         func_name = IMPORT_SECTION_FUNCS[reg_val]['name']
-                        print('call {}'.format(func_name))
+                        self.logger.debug('call {}'.format(func_name))
                         function_code[inst.address][1] = func_name
                     else:
                         assert False, 'call by register using not-imported function'
@@ -379,17 +377,17 @@ class FuncDisasm:
                     new_ep = int(inst.op_str, 16) - self.image_base
                     if self.image_base + new_ep not in KNOWN_FUNCS:
                         nested_func = FuncDisasm(self.binary, new_ep, self.image_base,
-                                                 self.sections_arr)
-                        print('[!] Inside nested function!')
+                                                 self.sections_arr, self.logger)
+                        self.logger.debug('[!] Start nested function')
                         rewrite_import_call = nested_func.run()
                         if rewrite_import_call:
-                            print(
+                            self.logger.debug(
                                 '[!] Patching last call instruction to imported function')
                             function_code[function_code.keys(
                             )[-1]][1] = rewrite_import_call
-                        print('[!] Outside nested function')
+                        self.logger.debug('[!] End nested function')
                     else:
-                        print('[!] call {}'.format(
+                        self.logger.debug('[!] call {}'.format(
                             KNOWN_FUNCS[new_ep + self.image_base]['name']))
         KNOWN_FUNCS[self.entry_point + self.image_base] = {
             'code': function_code,
@@ -401,29 +399,42 @@ def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument('-f', '--file', help='file destination to act on', required=True)
     arg_parser.add_argument('-r', '--rva', help='RVA of a function inside file to rewrite', required=True)
+    arg_parser.add_argument('--verbose', action='store_true', help='Print verbose asm output in stdout')
     args = arg_parser.parse_args()
+
+
+    logger = logging.getLogger('asm_re')
+
+    hdler = logging.StreamHandler()
+    logger.addHandler(hdler)
+    if args.verbose:
+        cur_log_level = logger.setLevel(logging.DEBUG)
+    else:
+        cur_log_level = logger.setLevel(logging.INFO)
+
     file_location, required_function_rva = args.file, int(args.rva, 16)
     if not os.path.exists(file_location):
         print('[-] Specified file {} not found'.format(file_location))
         sys.exit(1)
 
     mydriver = pefile.PE(file_location)
-    sections_triplet, text_base_address = get_section_info(mydriver)
-    print('[!] Text section  base address: {}'.format(hex(text_base_address)))
-    assert False, sections_triplet
+    sections_info = get_section_info(mydriver, logger)
+    text_base_address = sections_info['.text\x00\x00\x00'][0]
+    logger.info('[!] Text section rva address: {}'.format(hex(text_base_address)))
 
     whole_image = bytearray(mydriver.get_memory_mapped_image())
 
-    fill_imports(mydriver, whole_image)
+    fill_imports(mydriver, whole_image, logger)
     
     start_disas_addr = text_base_address + required_function_rva
     func_disasm = FuncDisasm(binary=bytes(whole_image), entry_point=start_disas_addr,
                              image_base=mydriver.OPTIONAL_HEADER.ImageBase,
-                             sections_arr=sections_triplet)
+                             sections_arr=sections_info,
+                             logger=logger)
     func_disasm.run()
     postproces_defs(KNOWN_FUNCS)
 
-    print_asm('myresult_result.asm', KNOWN_FUNCS)
+    print_asm('myresult_result.asm', KNOWN_FUNCS, logger)
 
 
 if __name__ == '__main__':
